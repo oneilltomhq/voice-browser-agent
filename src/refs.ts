@@ -9,6 +9,7 @@ import type { CDPSession } from './cdp';
 
 interface AXNode {
   nodeId: string;
+  parentId?: string;
   backendDOMNodeId?: number;
   role?: { value: string };
   name?: { value: string };
@@ -29,12 +30,9 @@ interface DOMSnapshotResult {
   }>;
 }
 
-/** Generate unique ref ID */
-function generateRefId(node: AXNode, index: number): string {
-  const role = node.role?.value || 'unknown';
-  const name = node.name?.value?.slice(0, 20) || '';
-  const safeName = name.replace(/[^a-zA-Z0-9]/g, '_');
-  return `${role}_${safeName}_${index}`.toLowerCase();
+/** Generate short sequential ref ID */
+function generateRefId(index: number): string {
+  return `e${index}`;
 }
 
 /** Extract bounding box from layout data */
@@ -68,6 +66,115 @@ function isVisible(box: BoundingBox | null): boolean {
   return box.width > 0 && box.height > 0;
 }
 
+interface TreeNode {
+  node: AXNode;
+  ref?: Ref;
+  children: TreeNode[];
+}
+
+function buildTree(nodes: AXNode[], refsByAxId: Map<string, Ref>): TreeNode | null {
+  if (nodes.length === 0) return null;
+
+  const nodeMap = new Map<string, AXNode>();
+  const childrenByParent = new Map<string, string[]>();
+
+  for (const node of nodes) {
+    nodeMap.set(node.nodeId, node);
+  }
+
+  for (const node of nodes) {
+    if (!node.parentId) continue;
+    const siblings = childrenByParent.get(node.parentId);
+    if (siblings) {
+      siblings.push(node.nodeId);
+    } else {
+      childrenByParent.set(node.parentId, [node.nodeId]);
+    }
+  }
+
+  function getChildIds(nodeId: string): string[] {
+    return childrenByParent.get(nodeId) ?? nodeMap.get(nodeId)?.childIds ?? [];
+  }
+
+  function collectDescendants(nodeId: string, visiting: Set<string>): TreeNode[] {
+    const results: TreeNode[] = [];
+    for (const childId of getChildIds(nodeId)) {
+      const child = nodeMap.get(childId);
+      if (!child) continue;
+      if (child.ignored) {
+        if (!visiting.has(childId)) {
+          visiting.add(childId);
+          results.push(...collectDescendants(childId, visiting));
+          visiting.delete(childId);
+        }
+      } else {
+        const childTree = toTreeNode(child, visiting);
+        if (childTree) results.push(childTree);
+      }
+    }
+    return results;
+  }
+
+  function toTreeNode(axNode: AXNode, visiting: Set<string>): TreeNode | null {
+    if (axNode.ignored) return null;
+    if (visiting.has(axNode.nodeId)) return null;
+    visiting.add(axNode.nodeId);
+
+    const children = collectDescendants(axNode.nodeId, visiting);
+
+    visiting.delete(axNode.nodeId);
+
+    const ref = refsByAxId.get(axNode.nodeId);
+
+    if (ref || children.length > 0) return { node: axNode, ref, children };
+
+    if (axNode.name?.value) return { node: axNode, ref, children };
+
+    return null;
+  }
+
+  const root =
+    nodes.find(n => n.role?.value?.toLowerCase() === 'rootwebarea') ??
+    nodes.find(n => !n.parentId) ??
+    nodes[0];
+
+  return toTreeNode(root, new Set());
+}
+
+const SKIP_ROLES = new Set(['none', 'generic', 'genericcontainer']);
+
+function renderTree(treeNode: TreeNode, depth: number = 0): string {
+  const lines: string[] = [];
+  const indent = '  '.repeat(depth);
+  const role = treeNode.node.role?.value || 'unknown';
+  const name = treeNode.node.name?.value || '';
+  const refTag = treeNode.ref ? ` [ref=${treeNode.ref.id}]` : '';
+
+  const skip = SKIP_ROLES.has(role.toLowerCase()) && !treeNode.ref;
+  if (!skip) {
+    const nameStr = name ? ` "${name}"` : '';
+    lines.push(`${indent}${role}${nameStr}${refTag}`);
+  }
+
+  const childDepth = skip ? depth : depth + 1;
+  for (const child of treeNode.children) {
+    lines.push(renderTree(child, childDepth));
+  }
+
+  return lines.filter(Boolean).join('\n');
+}
+
+export function formatAriaTree(nodes: AXNode[], refs: Ref[]): string {
+  const refsByAxId = new Map<string, Ref>();
+  for (const ref of refs) {
+    if (ref.axNodeId) refsByAxId.set(ref.axNodeId, ref);
+  }
+
+  const root = buildTree(nodes, refsByAxId);
+  if (!root) return 'Empty page';
+  return renderTree(root);
+}
+
 /**
  * Build refs from AX tree + DOM snapshot
  * Pipeline:
@@ -76,7 +183,12 @@ function isVisible(box: BoundingBox | null): boolean {
  * 3. Join on backendNodeId
  * 4. Filter to actionable, visible elements
  */
-export async function buildRefs(session: CDPSession): Promise<Ref[]> {
+export interface BuildRefsResult {
+  refs: Ref[];
+  tree: string;
+}
+
+export async function buildRefs(session: CDPSession): Promise<BuildRefsResult> {
   const axResult = await session.send<{ nodes: AXNode[] }>(
     'Accessibility.getFullAXTree'
   );
@@ -106,7 +218,7 @@ export async function buildRefs(session: CDPSession): Promise<Ref[]> {
     if (!isVisible(boundingBox)) continue;
 
     const ref: Ref = {
-      id: generateRefId(node, index),
+      id: generateRefId(index),
       backendNodeId: node.backendDOMNodeId,
       axNodeId: node.nodeId,
       role: node.role?.value || 'unknown',
@@ -119,7 +231,8 @@ export async function buildRefs(session: CDPSession): Promise<Ref[]> {
     index++;
   }
 
-  return refs;
+  const tree = formatAriaTree(axResult.nodes, refs);
+  return { refs, tree };
 }
 
 /** Store refs by ID for quick lookup */

@@ -94,11 +94,8 @@ var ACTIONABLE_ROLES = /* @__PURE__ */ new Set([
 ]);
 
 // src/refs.ts
-function generateRefId(node, index) {
-  const role = node.role?.value || "unknown";
-  const name = node.name?.value?.slice(0, 20) || "";
-  const safeName = name.replace(/[^a-zA-Z0-9]/g, "_");
-  return `${role}_${safeName}_${index}`.toLowerCase();
+function generateRefId(index) {
+  return `e${index}`;
 }
 function extractBoundingBox(backendNodeId, snapshot2) {
   for (const doc of snapshot2.documents) {
@@ -122,6 +119,84 @@ function isVisible(box) {
   if (!box) return false;
   return box.width > 0 && box.height > 0;
 }
+function buildTree(nodes, refsByAxId) {
+  if (nodes.length === 0) return null;
+  const nodeMap = /* @__PURE__ */ new Map();
+  const childrenByParent = /* @__PURE__ */ new Map();
+  for (const node of nodes) {
+    nodeMap.set(node.nodeId, node);
+  }
+  for (const node of nodes) {
+    if (!node.parentId) continue;
+    const siblings = childrenByParent.get(node.parentId);
+    if (siblings) {
+      siblings.push(node.nodeId);
+    } else {
+      childrenByParent.set(node.parentId, [node.nodeId]);
+    }
+  }
+  function getChildIds(nodeId) {
+    return childrenByParent.get(nodeId) ?? nodeMap.get(nodeId)?.childIds ?? [];
+  }
+  function collectDescendants(nodeId, visiting) {
+    const results = [];
+    for (const childId of getChildIds(nodeId)) {
+      const child = nodeMap.get(childId);
+      if (!child) continue;
+      if (child.ignored) {
+        if (!visiting.has(childId)) {
+          visiting.add(childId);
+          results.push(...collectDescendants(childId, visiting));
+          visiting.delete(childId);
+        }
+      } else {
+        const childTree = toTreeNode(child, visiting);
+        if (childTree) results.push(childTree);
+      }
+    }
+    return results;
+  }
+  function toTreeNode(axNode, visiting) {
+    if (axNode.ignored) return null;
+    if (visiting.has(axNode.nodeId)) return null;
+    visiting.add(axNode.nodeId);
+    const children = collectDescendants(axNode.nodeId, visiting);
+    visiting.delete(axNode.nodeId);
+    const ref = refsByAxId.get(axNode.nodeId);
+    if (ref || children.length > 0) return { node: axNode, ref, children };
+    if (axNode.name?.value) return { node: axNode, ref, children };
+    return null;
+  }
+  const root = nodes.find((n) => n.role?.value?.toLowerCase() === "rootwebarea") ?? nodes.find((n) => !n.parentId) ?? nodes[0];
+  return toTreeNode(root, /* @__PURE__ */ new Set());
+}
+var SKIP_ROLES = /* @__PURE__ */ new Set(["none", "generic", "genericcontainer"]);
+function renderTree(treeNode, depth = 0) {
+  const lines = [];
+  const indent = "  ".repeat(depth);
+  const role = treeNode.node.role?.value || "unknown";
+  const name = treeNode.node.name?.value || "";
+  const refTag = treeNode.ref ? ` [ref=${treeNode.ref.id}]` : "";
+  const skip = SKIP_ROLES.has(role.toLowerCase()) && !treeNode.ref;
+  if (!skip) {
+    const nameStr = name ? ` "${name}"` : "";
+    lines.push(`${indent}${role}${nameStr}${refTag}`);
+  }
+  const childDepth = skip ? depth : depth + 1;
+  for (const child of treeNode.children) {
+    lines.push(renderTree(child, childDepth));
+  }
+  return lines.filter(Boolean).join("\n");
+}
+function formatAriaTree(nodes, refs) {
+  const refsByAxId = /* @__PURE__ */ new Map();
+  for (const ref of refs) {
+    if (ref.axNodeId) refsByAxId.set(ref.axNodeId, ref);
+  }
+  const root = buildTree(nodes, refsByAxId);
+  if (!root) return "Empty page";
+  return renderTree(root);
+}
 async function buildRefs(session) {
   const axResult = await session.send(
     "Accessibility.getFullAXTree"
@@ -144,7 +219,7 @@ async function buildRefs(session) {
     const boundingBox = extractBoundingBox(node.backendDOMNodeId, domSnapshot);
     if (!isVisible(boundingBox)) continue;
     const ref = {
-      id: generateRefId(node, index),
+      id: generateRefId(index),
       backendNodeId: node.backendDOMNodeId,
       axNodeId: node.nodeId,
       role: node.role?.value || "unknown",
@@ -155,7 +230,8 @@ async function buildRefs(session) {
     refs.push(ref);
     index++;
   }
-  return refs;
+  const tree = formatAriaTree(axResult.nodes, refs);
+  return { refs, tree };
 }
 var RefStore = class {
   refs = /* @__PURE__ */ new Map();
@@ -214,13 +290,14 @@ async function navigate(session, tabId, url) {
 }
 async function snapshot(session, tabId) {
   try {
-    const refs = await buildRefs(session);
+    const { refs, tree } = await buildRefs(session);
     const store = getRefStore(tabId);
     store.update(refs);
     return {
       success: true,
       data: {
         refs,
+        tree,
         timestamp: Date.now()
       }
     };
@@ -261,9 +338,54 @@ async function click(session, tabId, refId) {
     return { success: false, error: String(error) };
   }
 }
-async function type(session, text) {
+async function type(session, tabId, text, options = {}) {
   try {
-    await session.send("Input.insertText", { text });
+    if (options.ref) {
+      const result = await click(session, tabId, options.ref);
+      if (!result.success) return result;
+    }
+    if (options.clear) {
+      await session.send("Input.dispatchKeyEvent", {
+        type: "keyDown",
+        key: "a",
+        modifiers: 2,
+        windowsVirtualKeyCode: 65
+      });
+      await session.send("Input.dispatchKeyEvent", {
+        type: "keyUp",
+        key: "a",
+        modifiers: 2,
+        windowsVirtualKeyCode: 65
+      });
+      await session.send("Input.dispatchKeyEvent", {
+        type: "keyDown",
+        key: "Backspace",
+        windowsVirtualKeyCode: 8
+      });
+      await session.send("Input.dispatchKeyEvent", {
+        type: "keyUp",
+        key: "Backspace",
+        windowsVirtualKeyCode: 8
+      });
+    }
+    if (options.pressSequentially) {
+      for (const char of text) {
+        await session.send("Input.dispatchKeyEvent", {
+          type: "keyDown",
+          key: char,
+          text: char,
+          windowsVirtualKeyCode: char.toUpperCase().charCodeAt(0)
+        });
+        await session.send("Input.dispatchKeyEvent", {
+          type: "keyUp",
+          key: char,
+          windowsVirtualKeyCode: char.toUpperCase().charCodeAt(0)
+        });
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    } else {
+      await session.send("Input.insertText", { text });
+    }
     return { success: true };
   } catch (error) {
     return { success: false, error: String(error) };
@@ -406,8 +528,8 @@ async function handleCommand(tabId, command, params) {
         return await click(session, tabId, ref);
       }
       case "type": {
-        const { text } = params;
-        return await type(session, text);
+        const { text, ...options } = params;
+        return await type(session, tabId, text, options);
       }
       case "pressKey": {
         const { key, modifiers } = params;

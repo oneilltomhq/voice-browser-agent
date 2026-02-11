@@ -53,6 +53,9 @@ export interface ClickParams {
 
 export interface TypeParams {
   text: string;
+  ref?: string;
+  clear?: boolean;
+  pressSequentially?: boolean;
 }
 
 export interface PressKeyParams {
@@ -88,6 +91,7 @@ export interface CommandResult<T = unknown> {
 
 export interface SnapshotResult {
   refs: Ref[];
+  tree: string;
   timestamp: number;
 }
 

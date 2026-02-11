@@ -74,7 +74,7 @@ export async function snapshot(
   tabId: number
 ): Promise<CommandResult<SnapshotResult>> {
   try {
-    const refs = await buildRefs(session);
+    const { refs, tree } = await buildRefs(session);
     const store = getRefStore(tabId);
     store.update(refs);
 
@@ -82,6 +82,7 @@ export async function snapshot(
       success: true,
       data: {
         refs,
+        tree,
         timestamp: Date.now(),
       },
     };
@@ -141,14 +142,64 @@ export async function click(
 }
 
 /**
- * type(text) — Input.insertText
+ * type(text) — supports ref targeting, clear, and sequential typing
  */
 export async function type(
   session: CDPSession,
-  text: string
+  tabId: number,
+  text: string,
+  options: { ref?: string; clear?: boolean; pressSequentially?: boolean } = {}
 ): Promise<CommandResult<void>> {
   try {
-    await session.send('Input.insertText', { text });
+    if (options.ref) {
+      const result = await click(session, tabId, options.ref);
+      if (!result.success) return result;
+    }
+
+    if (options.clear) {
+      await session.send('Input.dispatchKeyEvent', {
+        type: 'keyDown',
+        key: 'a',
+        modifiers: 2,
+        windowsVirtualKeyCode: 65,
+      });
+      await session.send('Input.dispatchKeyEvent', {
+        type: 'keyUp',
+        key: 'a',
+        modifiers: 2,
+        windowsVirtualKeyCode: 65,
+      });
+      await session.send('Input.dispatchKeyEvent', {
+        type: 'keyDown',
+        key: 'Backspace',
+        windowsVirtualKeyCode: 8,
+      });
+      await session.send('Input.dispatchKeyEvent', {
+        type: 'keyUp',
+        key: 'Backspace',
+        windowsVirtualKeyCode: 8,
+      });
+    }
+
+    if (options.pressSequentially) {
+      for (const char of text) {
+        await session.send('Input.dispatchKeyEvent', {
+          type: 'keyDown',
+          key: char,
+          text: char,
+          windowsVirtualKeyCode: char.toUpperCase().charCodeAt(0),
+        });
+        await session.send('Input.dispatchKeyEvent', {
+          type: 'keyUp',
+          key: char,
+          windowsVirtualKeyCode: char.toUpperCase().charCodeAt(0),
+        });
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    } else {
+      await session.send('Input.insertText', { text });
+    }
+
     return { success: true };
   } catch (error) {
     return { success: false, error: String(error) };

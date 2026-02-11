@@ -6,14 +6,17 @@
 import type { AutomationMessage, AutomationResponse, Ref } from './types';
 
 const COMMAND_HELP = `Available commands:
-  navigate <url>    — Navigate to a URL
-  snapshot          — Get accessibility snapshot
-  click <ref>       — Click an element by ref ID
-  type <text>       — Type text into focused element
-  pressKey <key>    — Press a key (Enter, Tab, etc.)
-  screenshot        — Capture page screenshot
-  evaluate <js>     — Evaluate JavaScript
-  help              — Show this help`;
+  navigate <url>       — Navigate to a URL
+  snapshot             — Get accessibility snapshot (ARIA tree)
+  click <ref>          — Click an element by ref ID (e.g. e1)
+  type <text>          — Type text into focused element
+  type <ref> <text>    — Type text into element by ref
+  type --clear <text>  — Clear field then type
+  type --seq <text>    — Type character by character
+  pressKey <key>       — Press a key (Enter, Tab, etc.)
+  screenshot           — Capture page screenshot
+  evaluate <js>        — Evaluate JavaScript
+  help                 — Show this help`;
 
 /** Send command to background */
 async function sendCommand<T = unknown>(
@@ -56,10 +59,27 @@ function parseInput(input: string): {
         ? { command: 'click', params: { ref: rest } }
         : null;
 
-    case 'type':
-      return rest
-        ? { command: 'type', params: { text: rest } }
-        : null;
+    case 'type': {
+      if (!rest) return null;
+      const typeParams: Record<string, unknown> = {};
+      let remaining = rest;
+      if (remaining.startsWith('--clear ')) {
+        typeParams.clear = true;
+        remaining = remaining.slice(8);
+      }
+      if (remaining.startsWith('--seq ')) {
+        typeParams.pressSequentially = true;
+        remaining = remaining.slice(6);
+      }
+      const refMatch = remaining.match(/^(e\d+)\s+(.+)$/);
+      if (refMatch) {
+        typeParams.ref = refMatch[1];
+        typeParams.text = refMatch[2];
+      } else {
+        typeParams.text = remaining;
+      }
+      return { command: 'type', params: typeParams };
+    }
 
     case 'presskey':
     case 'press':
@@ -110,19 +130,10 @@ function addMessage(
   messages.scrollTop = messages.scrollHeight;
 }
 
-/** Format snapshot refs for display */
-function formatRefs(refs: Ref[]): string {
-  if (refs.length === 0) return 'No actionable elements found.';
-
-  const lines = refs.slice(0, 30).map(
-    (r) => `  [${r.id}] ${r.role}: ${r.name || '(unnamed)'}`
-  );
-
-  let text = `Found ${refs.length} actionable elements:\n${lines.join('\n')}`;
-  if (refs.length > 30) {
-    text += `\n  ... and ${refs.length - 30} more`;
-  }
-  return text;
+/** Format snapshot for display */
+function formatSnapshot(tree: string, refCount: number): string {
+  if (refCount === 0) return 'No actionable elements found.';
+  return `${refCount} actionable elements:\n${tree}`;
 }
 
 /** Handle command execution */
@@ -156,8 +167,8 @@ async function executeCommand(input: string): Promise<void> {
       break;
 
     case 'snapshot': {
-      const data = result.data as { refs: Ref[]; timestamp: number };
-      addMessage('system', formatRefs(data.refs));
+      const data = result.data as { refs: Ref[]; tree: string; timestamp: number };
+      addMessage('system', formatSnapshot(data.tree, data.refs.length));
       break;
     }
 

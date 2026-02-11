@@ -71,8 +71,13 @@ async function handleCommand<C extends CommandName>(
       }
 
       case 'type': {
-        const { text } = params as { text: string };
-        return await commands.type(session, text);
+        const { text, ...options } = params as {
+          text: string;
+          ref?: string;
+          clear?: boolean;
+          pressSequentially?: boolean;
+        };
+        return await commands.type(session, tabId, text, options);
       }
 
       case 'pressKey': {

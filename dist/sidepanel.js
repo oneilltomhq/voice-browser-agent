@@ -1,13 +1,16 @@
 // src/sidepanel.ts
 var COMMAND_HELP = `Available commands:
-  navigate <url>    \u2014 Navigate to a URL
-  snapshot          \u2014 Get accessibility snapshot
-  click <ref>       \u2014 Click an element by ref ID
-  type <text>       \u2014 Type text into focused element
-  pressKey <key>    \u2014 Press a key (Enter, Tab, etc.)
-  screenshot        \u2014 Capture page screenshot
-  evaluate <js>     \u2014 Evaluate JavaScript
-  help              \u2014 Show this help`;
+  navigate <url>       \u2014 Navigate to a URL
+  snapshot             \u2014 Get accessibility snapshot (ARIA tree)
+  click <ref>          \u2014 Click an element by ref ID (e.g. e1)
+  type <text>          \u2014 Type text into focused element
+  type <ref> <text>    \u2014 Type text into element by ref
+  type --clear <text>  \u2014 Clear field then type
+  type --seq <text>    \u2014 Type character by character
+  pressKey <key>       \u2014 Press a key (Enter, Tab, etc.)
+  screenshot           \u2014 Capture page screenshot
+  evaluate <js>        \u2014 Evaluate JavaScript
+  help                 \u2014 Show this help`;
 async function sendCommand(command, params = {}) {
   const message = {
     type: "command",
@@ -30,8 +33,27 @@ function parseInput(input) {
       return { command: "snapshot", params: {} };
     case "click":
       return rest ? { command: "click", params: { ref: rest } } : null;
-    case "type":
-      return rest ? { command: "type", params: { text: rest } } : null;
+    case "type": {
+      if (!rest) return null;
+      const typeParams = {};
+      let remaining = rest;
+      if (remaining.startsWith("--clear ")) {
+        typeParams.clear = true;
+        remaining = remaining.slice(8);
+      }
+      if (remaining.startsWith("--seq ")) {
+        typeParams.pressSequentially = true;
+        remaining = remaining.slice(6);
+      }
+      const refMatch = remaining.match(/^(e\d+)\s+(.+)$/);
+      if (refMatch) {
+        typeParams.ref = refMatch[1];
+        typeParams.text = refMatch[2];
+      } else {
+        typeParams.text = remaining;
+      }
+      return { command: "type", params: typeParams };
+    }
     case "presskey":
     case "press":
       return rest ? { command: "pressKey", params: { key: rest } } : null;
@@ -63,18 +85,10 @@ function addMessage(role, text, imageUrl) {
   messages.appendChild(msg);
   messages.scrollTop = messages.scrollHeight;
 }
-function formatRefs(refs) {
-  if (refs.length === 0) return "No actionable elements found.";
-  const lines = refs.slice(0, 30).map(
-    (r) => `  [${r.id}] ${r.role}: ${r.name || "(unnamed)"}`
-  );
-  let text = `Found ${refs.length} actionable elements:
-${lines.join("\n")}`;
-  if (refs.length > 30) {
-    text += `
-  ... and ${refs.length - 30} more`;
-  }
-  return text;
+function formatSnapshot(tree, refCount) {
+  if (refCount === 0) return "No actionable elements found.";
+  return `${refCount} actionable elements:
+${tree}`;
 }
 async function executeCommand(input) {
   addMessage("user", input);
@@ -99,7 +113,7 @@ async function executeCommand(input) {
       break;
     case "snapshot": {
       const data = result.data;
-      addMessage("system", formatRefs(data.refs));
+      addMessage("system", formatSnapshot(data.tree, data.refs.length));
       break;
     }
     case "click":
