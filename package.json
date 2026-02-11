@@ -1,0 +1,16 @@
+{
+  "name": "voice-browser-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "esbuild src/background.ts src/sidepanel.ts src/options.ts --bundle --outdir=dist --format=esm --target=es2022",
+    "watch": "npm run build -- --watch",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "chrome-types": "^0.1.327",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.7.0"
+  }
+}
